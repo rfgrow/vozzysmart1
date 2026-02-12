@@ -75,24 +75,33 @@ export const ContactImportModal: React.FC<ContactImportModalProps> = ({
   const [columnMapping, setColumnMapping] = useState<ColumnMapping>(initialColumnMapping);
   const [importResult, setImportResult] = useState<ImportResult>({ total: 0, inserted: 0, updated: 0, errors: 0 });
   const [isMappingSheetOpen, setIsMappingSheetOpen] = useState(false);
+  const [importProgress, setImportProgress] = useState({ current: 0, total: 0 });
+  const [isCancelled, setIsCancelled] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Buscar telefones existentes quando o modal abre
-  useEffect(() => {
-    if (isOpen) {
-      const fetchExistingPhones = async () => {
-        try {
-          const { contactService } = await import('@/services/contactService');
-          const contacts = await contactService.getAll();
-          const phones = new Set(contacts.map(c => c.phone).filter(Boolean));
-          setExistingPhones(phones);
-        } catch (err) {
-          console.error('Failed to fetch existing phones:', err);
-        }
-      };
-      fetchExistingPhones();
+  // Otimizado: Buscar apenas telefones específicos do CSV ao invés de todos os contatos
+  const checkDuplicatePhones = async (phonesToCheck: string[]): Promise<Set<string>> => {
+    if (phonesToCheck.length === 0) return new Set();
+    
+    try {
+      const response = await fetch('/api/contacts/check-duplicates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phones: phonesToCheck }),
+      });
+      
+      if (!response.ok) {
+        console.error('Failed to check duplicates, falling back to empty set');
+        return new Set();
+      }
+      
+      const { duplicates } = await response.json();
+      return new Set(duplicates || []);
+    } catch (err) {
+      console.error('Failed to check duplicate phones:', err);
+      return new Set();
     }
-  }, [isOpen]);
+  };
 
   // Calcular estatísticas de pré-importação baseado no mapeamento atual
   const previewStats = useMemo((): ImportPreviewStats => {
@@ -190,6 +199,9 @@ export const ContactImportModal: React.FC<ContactImportModalProps> = ({
   const executeImport = async () => {
     if (!columnMapping.phone || !csvFile) return;
 
+    const BATCH_SIZE = 500;
+    setIsCancelled(false);
+
     const reader = new FileReader();
     reader.onload = async (event) => {
       const text = event.target?.result as string;
@@ -247,12 +259,44 @@ export const ContactImportModal: React.FC<ContactImportModalProps> = ({
         };
       }).filter(c => c.phone.length > 8);
 
-      const result = await onImport(contactsToImport);
+      // Verificar duplicados apenas dos telefones do CSV
+      const phonesToCheck = contactsToImport.map(c => c.phone);
+      const duplicatePhones = await checkDuplicatePhones(phonesToCheck);
+      setExistingPhones(duplicatePhones);
+
+      // Processar em lotes
+      let totalInserted = 0;
+      let totalUpdated = 0;
+      const totalBatches = Math.ceil(contactsToImport.length / BATCH_SIZE);
+
+      setImportProgress({ current: 0, total: contactsToImport.length });
+
+      for (let i = 0; i < totalBatches; i++) {
+        if (isCancelled) {
+          console.log('[ContactImportModal] Import cancelled by user');
+          break;
+        }
+
+        const batchStart = i * BATCH_SIZE;
+        const batchEnd = Math.min(batchStart + BATCH_SIZE, contactsToImport.length);
+        const batch = contactsToImport.slice(batchStart, batchEnd);
+
+        try {
+          const result = await onImport(batch);
+          totalInserted += result.inserted;
+          totalUpdated += result.updated;
+
+          setImportProgress({ current: batchEnd, total: contactsToImport.length });
+        } catch (error) {
+          console.error(`[ContactImportModal] Batch ${i + 1} failed:`, error);
+          // Continue com próximo lote mesmo se este falhar
+        }
+      }
 
       setImportResult({
         total: rows.length,
-        inserted: result.inserted,
-        updated: result.updated,
+        inserted: totalInserted,
+        updated: totalUpdated,
         errors: rows.length - contactsToImport.length // Linhas com telefone inválido
       });
       setStep(3);
@@ -324,11 +368,38 @@ export const ContactImportModal: React.FC<ContactImportModalProps> = ({
             </button>
           )}
 
+
           {step === 2 && (
             <>
+              {/* Progress bar - shown when importing */}
+              {isImporting && importProgress.total > 0 && (
+                <div className="w-full mb-4">
+                  <div className="flex justify-between text-sm text-gray-400 mb-2">
+                    <span>Importando contatos...</span>
+                    <span>{importProgress.current} / {importProgress.total}</span>
+                  </div>
+                  <div className="w-full bg-gray-700 rounded-full h-2">
+                    <div
+                      className="bg-primary-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${(importProgress.current / importProgress.total) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
               <button onClick={resetAndClose} className="text-gray-400 hover:text-white px-4 py-2 text-sm font-medium" disabled={isImporting}>
                 Cancelar
               </button>
+              
+              {isImporting && (
+                <button
+                  onClick={() => setIsCancelled(true)}
+                  className="bg-red-600 text-white px-6 py-2.5 rounded-lg font-bold hover:bg-red-500 transition-colors flex items-center gap-2"
+                >
+                  <X size={18} /> Parar Importação
+                </button>
+              )}
+              
               <button
                 onClick={executeImport}
                 disabled={isImporting}
