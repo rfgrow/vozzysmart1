@@ -4,6 +4,8 @@ import { requireSessionOrApiKey } from '@/lib/request-auth'
 import { ImportContactsSchema, validateBody, formatZodErrors } from '@/lib/api-validation'
 import { ContactStatus } from '@/types'
 
+export const maxDuration = 120
+
 /**
  * POST /api/contacts/import
  * Import multiple contacts from CSV/file
@@ -47,8 +49,17 @@ export async function POST(request: Request) {
     })
   } catch (error) {
     console.error('Failed to import contacts:', error)
+    
+    // Log error details for debugging
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    const errorStack = error instanceof Error ? error.stack : undefined
+    console.error('Error details:', { message: errorMessage, stack: errorStack })
+    
     return NextResponse.json(
-      { error: 'Falha ao importar contatos' },
+      { 
+        error: 'Falha ao importar contatos',
+        details: process.env.NODE_ENV === 'development' ? errorMessage : undefined
+      },
       { status: 500 }
     )
   }
